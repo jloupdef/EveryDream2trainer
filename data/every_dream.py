@@ -24,7 +24,7 @@ import random
 from torchvision import transforms
 from transformers import CLIPTokenizer
 import torch.nn.functional as F
-import numpy
+import numpy as np
 
 class EveryDreamBatch(Dataset):
     """
@@ -147,6 +147,7 @@ class EveryDreamBatch(Dataset):
             example["caption"] = train_item["caption"].get_caption()
 
         example["image"] = image_transforms(train_item["image"])
+        example["depth_mask"] = transforms.ToTensor()(train_item["depth_mask"])
 
         if random.random() > self.conditional_dropout:
             example["tokens"] = self.tokenizer(example["caption"],
@@ -174,6 +175,8 @@ class EveryDreamBatch(Dataset):
         image_train_tmp = image_train_item.hydrate(crop=False, save=save, crop_jitter=self.crop_jitter)
 
         example["image"] = image_train_tmp.image
+        depth_pathname = f"{image_train_item.pathname}.depth.npy"
+        example["depth_mask"] = np.load(depth_pathname)
         example["caption"] = image_train_tmp.caption
         example["runt_size"] = image_train_tmp.runt_size
         return example

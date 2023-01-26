@@ -42,7 +42,7 @@ from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionMod
 #from diffusers.models import AttentionBlock
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, DPTForDepthEstimation, DPTImageProcessor
 #from accelerate import Accelerator
 from accelerate.utils import set_seed
 
@@ -475,15 +475,120 @@ def main(args):
             if model_root_folder is None:
                 raise ValueError(f"No local file/folder for {args.resume_ckpt}, and no matching huggingface.co repo could be downloaded")
 
+        tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
+
+        depth_estimator = DPTForDepthEstimation.from_pretrained(model_root_folder, subfolder="depth_estimator")
+        dpt_feature_extractor = DPTImageProcessor.from_pretrained(model_root_folder + "/feature_extractor")
+
+        train_batch = EveryDreamBatch(
+            data_root=args.data_root,
+            flip_p=args.flip_p,
+            debug_level=1,
+            batch_size=args.batch_size,
+            conditional_dropout=args.cond_dropout,
+            resolution=args.resolution,
+            tokenizer=tokenizer,
+            seed = seed,
+            log_folder=log_folder,
+            write_schedule=args.write_schedule,
+            shuffle_tags=args.shuffle_tags,
+            rated_dataset=args.rated_dataset,
+            rated_dataset_dropout_target=(1.0 - (args.rated_dataset_target_dropout_percent / 100.0))
+        )
+        
+        depth_estimator = depth_estimator.to(device, dtype=torch.float32)
+
+        for train_item in train_batch.image_train_items:
+            depth_pathname = f"{train_item.pathname}.depth.npy"
+            if os.path.isfile(depth_pathname):
+                continue
+
+            print(f'>>> Preprocessing {train_item.pathname}')
+
+            image_train_tmp = train_item.hydrate(crop=False, save=False, crop_jitter=20)
+            image = Image.fromarray(image_train_tmp.image)
+            image.save('input.png')
+
+            dtype = torch.float32
+            vae_scale_factor = 8
+            width, height = image.size
+            #width, height = map(lambda dim: dim - dim % 32, (width, height))  # resize to integer multiple of 32
+            #image = image.resize((width, height), resample=PIL_INTERPOLATION["lanczos"])
+            #width, height = image.size
+            
+            pixel_values = dpt_feature_extractor(images=image, return_tensors="pt").pixel_values
+            pixel_values = pixel_values.to(device=device)
+            # The DPT-Hybrid model uses batch-norm layers which are not compatible with fp16.
+            # So we use `torch.autocast` here for half precision inference.
+            context_manger = torch.autocast("cuda", dtype=dtype)
+            with context_manger:
+                depth_map = depth_estimator(pixel_values).predicted_depth
+
+            # interpolate to original size
+            prediction = torch.nn.functional.interpolate(
+                    depth_map.unsqueeze(1),
+                    size=(height // vae_scale_factor, width // vae_scale_factor),
+                    mode="bicubic",
+                    align_corners=False,
+            ).squeeze()
+
+            output = prediction.cpu().detach().numpy()
+
+            print(f"min: {np.min(output)} - max: {np.max(output)}")
+
+
+            depth_min = np.min(output)
+            depth_max = np.max(output)
+
+            formatted = ((output - depth_min) / (depth_max - depth_min) * 2.0 - 1.0)
+
+            np.save(depth_pathname, formatted)
+
+            #formatted2 = np.load(depth_pathname)
+
+            #print(formatted)
+            #print("Shape: ", formatted.shape)
+            #print("Data Type: ", formatted.dtype.name)
+            #print(formatted2)
+            #print("Shape: ", formatted2.shape)
+            #print("Data Type: ", formatted2.dtype.name)
+
+            #exit()
+
+            #depth = Image.fromarray(formatted)
+            #depth.save(depth_pathname)
+
+
+    #        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+    #        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+    #        depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
+    #        depth_map = depth_map.to("cpu")
+
+    #        img_arr = depth_map.detach().numpy().astype(np.uint8)
+    #        print(img_arr)
+    #        img_arr.tofile("test.file")
+
+    #        img_arr = np.fromfile("test.file", np.uint8)
+    #        print(img_arr)
+
+    #        print(depth_map)
+
+
+
+        # release memory used for depth estimation
+        del depth_estimator
+        del dpt_feature_extractor
+        torch.cuda.empty_cache()
+
         text_encoder = CLIPTextModel.from_pretrained(model_root_folder, subfolder="text_encoder")
         vae = AutoencoderKL.from_pretrained(model_root_folder, subfolder="vae")
         unet = UNet2DConditionModel.from_pretrained(model_root_folder, subfolder="unet")
         sample_scheduler = DDIMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
         noise_scheduler = DDPMScheduler.from_pretrained(model_root_folder, subfolder="scheduler")
-        tokenizer = CLIPTokenizer.from_pretrained(model_root_folder, subfolder="tokenizer", use_fast=False)
     except Exception as e:
         traceback.print_exc()
         logging.error(" * Failed to load checkpoint *")
+        exit()
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -547,22 +652,6 @@ def main(args):
         )
 
     log_optimizer(optimizer, betas, epsilon)
-
-    train_batch = EveryDreamBatch(
-        data_root=args.data_root,
-        flip_p=args.flip_p,
-        debug_level=1,
-        batch_size=args.batch_size,
-        conditional_dropout=args.cond_dropout,
-        resolution=args.resolution,
-        tokenizer=tokenizer,
-        seed = seed,
-        log_folder=log_folder,
-        write_schedule=args.write_schedule,
-        shuffle_tags=args.shuffle_tags,
-        rated_dataset=args.rated_dataset,
-        rated_dataset_dropout_target=(1.0 - (args.rated_dataset_target_dropout_percent / 100.0))
-    )
 
     torch.cuda.benchmark = False
 
@@ -649,6 +738,7 @@ def main(args):
         Collates batches
         """
         images = [example["image"] for example in batch]
+        depth_masks = [example["depth_mask"] for example in batch]
         captions = [example["caption"] for example in batch]
         tokens = [example["tokens"] for example in batch]
         runt_size = batch[0]["runt_size"]
@@ -656,9 +746,13 @@ def main(args):
         images = torch.stack(images)
         images = images.to(memory_format=torch.contiguous_format).float()
 
+        depth_masks = torch.stack(depth_masks)
+        depth_masks = depth_masks.to(memory_format=torch.contiguous_format).float()
+
         ret = {
             "tokens": torch.stack(tuple(tokens)),
             "image": images,
+            "depth_mask": depth_masks,
             "captions": captions,
             "runt_size": runt_size,
         }
@@ -775,6 +869,8 @@ def main(args):
                 del noise, latents, cuda_caption
 
                 with autocast(enabled=args.amp):
+                    if "depth_mask" in batch:
+                        noisy_latents = torch.cat([noisy_latents, batch["depth_mask"].to(unet.device)], dim=1)
                     model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
                 #del timesteps, encoder_hidden_states, noisy_latents
