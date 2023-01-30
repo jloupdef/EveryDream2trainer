@@ -38,7 +38,7 @@ import datetime
 import json
 from PIL import Image, ImageDraw, ImageFont
 
-from diffusers import StableDiffusionPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, PNDMScheduler, EulerAncestralDiscreteScheduler
+from diffusers import StableDiffusionDepth2ImgPipeline, AutoencoderKL, UNet2DConditionModel, DDIMScheduler, DDPMScheduler, PNDMScheduler, EulerAncestralDiscreteScheduler
 #from diffusers.models import AttentionBlock
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
@@ -315,7 +315,7 @@ def main(args):
         os.makedirs(log_folder)
 
     @torch.no_grad()
-    def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, save_ckpt_dir, yaml_name, save_full_precision=False):
+    def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, depth_estimator, save_ckpt_dir, yaml_name, save_full_precision=False):
         """
         Save the model to disk
         """
@@ -324,7 +324,8 @@ def main(args):
             logging.warning("  No model to save, something likely blew up on startup, not saving")
             return
         logging.info(f" * Saving diffusers model to {save_path}")
-        pipeline = StableDiffusionPipeline(
+        pipeline = StableDiffusionDepth2ImgPipeline(
+            depth_estimator=depth_estimator,
             vae=vae,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -359,11 +360,12 @@ def main(args):
         #     self.save_optimizer(self.ctx.optimizer, optimizer_path)
 
     @torch.no_grad()
-    def __create_inference_pipe(unet, text_encoder, tokenizer, scheduler, vae):
+    def __create_inference_pipe(unet, text_encoder, tokenizer, scheduler, vae, depth_estimator):
         """
         creates a pipeline for SD inference
         """
-        pipe = StableDiffusionPipeline(
+        pipe = StableDiffusionDepth2ImgPipeline(
+            depth_estimator=depth_estimator,
             vae=vae,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
@@ -376,7 +378,7 @@ def main(args):
 
         return pipe
 
-    def __generate_sample(pipe: StableDiffusionPipeline, prompt : str, cfg: float, resolution: int, gen):
+    def __generate_sample(pipe: StableDiffusionDepth2ImgPipeline, prompt : str, cfg: float, resolution: int, gen):
         """
         generates a single sample at a given cfg scale and saves it to disk
         """       
@@ -507,7 +509,7 @@ def main(args):
 
             image_train_tmp = train_item.hydrate(crop=False, save=False, crop_jitter=20)
             image = Image.fromarray(image_train_tmp.image)
-            image.save('input.png')
+            #image.save('input.png')
 
             dtype = torch.float32
             vae_scale_factor = 8
@@ -576,9 +578,9 @@ def main(args):
 
 
         # release memory used for depth estimation
-        del depth_estimator
-        del dpt_feature_extractor
-        torch.cuda.empty_cache()
+        #del depth_estimator
+        #del dpt_feature_extractor
+        #torch.cuda.empty_cache()
 
         text_encoder = CLIPTextModel.from_pretrained(model_root_folder, subfolder="text_encoder")
         vae = AutoencoderKL.from_pretrained(model_root_folder, subfolder="vae")
@@ -719,7 +721,7 @@ def main(args):
             logging.error(f"{Fore.LIGHTRED_EX} CTRL-C received, attempting to save model to {interrupted_checkpoint_path}{Style.RESET_ALL}")
             logging.error(f"{Fore.LIGHTRED_EX} ************************************************************************{Style.RESET_ALL}")
             time.sleep(2) # give opportunity to ctrl-C again to cancel save
-            __save_model(interrupted_checkpoint_path, unet, text_encoder, tokenizer, noise_scheduler, vae, args.save_ckpt_dir, args.save_full_precision)
+            __save_model(interrupted_checkpoint_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, args.save_ckpt_dir, args.save_full_precision)
         exit(_SIGTERM_EXIT_CODE)
 
     signal.signal(signal.SIGINT, sigterm_handler)
@@ -933,7 +935,7 @@ def main(args):
                     torch.cuda.empty_cache()
 
                 if (global_step + 1) % args.sample_steps == 0:
-                    pipe = __create_inference_pipe(unet=unet, text_encoder=text_encoder, tokenizer=tokenizer, scheduler=sample_scheduler, vae=vae)
+                    pipe = __create_inference_pipe(unet=unet, text_encoder=text_encoder, tokenizer=tokenizer, scheduler=sample_scheduler, vae=vae, depth_estimator=depth_estimator)
                     pipe = pipe.to(device)
 
                     with torch.no_grad():
