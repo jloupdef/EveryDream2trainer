@@ -315,7 +315,7 @@ def main(args):
         os.makedirs(log_folder)
 
     @torch.no_grad()
-    def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, depth_estimator, save_ckpt_dir, yaml_name, save_full_precision=False):
+    def __save_model(save_path, unet, text_encoder, tokenizer, scheduler, vae, depth_estimator, dpt_feature_extractor, save_ckpt_dir, yaml_name, save_full_precision=False):
         """
         Save the model to disk
         """
@@ -331,9 +331,7 @@ def main(args):
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            safety_checker=None, # save vram
-            requires_safety_checker=None, # avoid nag
-            feature_extractor=None, # must be none of no safety checker
+            feature_extractor=dpt_feature_extractor
         )
         pipeline.save_pretrained(save_path)
         sd_ckpt_path = f"{os.path.basename(save_path)}.ckpt"
@@ -360,7 +358,7 @@ def main(args):
         #     self.save_optimizer(self.ctx.optimizer, optimizer_path)
 
     @torch.no_grad()
-    def __create_inference_pipe(unet, text_encoder, tokenizer, scheduler, vae, depth_estimator):
+    def __create_inference_pipe(unet, text_encoder, tokenizer, scheduler, vae, depth_estimator, dpt_feature_extractor):
         """
         creates a pipeline for SD inference
         """
@@ -371,9 +369,7 @@ def main(args):
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            safety_checker=None, # save vram
-            requires_safety_checker=None, # avoid nag
-            feature_extractor=None, # must be none of no safety checker
+            feature_extractor=dpt_feature_extractor
         )
 
         return pipe
@@ -721,7 +717,7 @@ def main(args):
             logging.error(f"{Fore.LIGHTRED_EX} CTRL-C received, attempting to save model to {interrupted_checkpoint_path}{Style.RESET_ALL}")
             logging.error(f"{Fore.LIGHTRED_EX} ************************************************************************{Style.RESET_ALL}")
             time.sleep(2) # give opportunity to ctrl-C again to cancel save
-            __save_model(interrupted_checkpoint_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, args.save_ckpt_dir, args.save_full_precision)
+            __save_model(interrupted_checkpoint_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, dpt_feature_extractor, args.save_ckpt_dir, args.save_full_precision)
         exit(_SIGTERM_EXIT_CODE)
 
     signal.signal(signal.SIGINT, sigterm_handler)
@@ -935,7 +931,7 @@ def main(args):
                     torch.cuda.empty_cache()
 
                 if (global_step + 1) % args.sample_steps == 0:
-                    pipe = __create_inference_pipe(unet=unet, text_encoder=text_encoder, tokenizer=tokenizer, scheduler=sample_scheduler, vae=vae, depth_estimator=depth_estimator)
+                    pipe = __create_inference_pipe(unet=unet, text_encoder=text_encoder, tokenizer=tokenizer, scheduler=sample_scheduler, vae=vae, depth_estimator=depth_estimator, dpt_feature_extractor=dpt_feature_extractor)
                     pipe = pipe.to(device)
 
                     with torch.no_grad():
@@ -956,12 +952,12 @@ def main(args):
                     last_epoch_saved_time = time.time()
                     logging.info(f"Saving model, {args.ckpt_every_n_minutes} mins at step {global_step}")
                     save_path = os.path.join(f"{log_folder}/ckpts/{args.project_name}-ep{epoch:02}-gs{global_step:05}")
-                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, args.save_ckpt_dir, yaml, args.save_full_precision)
+                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, dpt_feature_extractor, args.save_ckpt_dir, yaml, args.save_full_precision)
 
                 if epoch > 0 and epoch % args.save_every_n_epochs == 0 and step == 1 and epoch < args.max_epochs - 1:
                     logging.info(f" Saving model, {args.save_every_n_epochs} epochs at step {global_step}")
                     save_path = os.path.join(f"{log_folder}/ckpts/{args.project_name}-ep{epoch:02}-gs{global_step:05}")
-                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, args.save_ckpt_dir, yaml, args.save_full_precision)
+                    __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, dpt_feature_extractor, args.save_ckpt_dir, yaml, args.save_full_precision)
 
                 del batch
                 global_step += 1
@@ -986,7 +982,7 @@ def main(args):
         # end of training
 
         save_path = os.path.join(f"{log_folder}/ckpts/last-{args.project_name}-ep{epoch:02}-gs{global_step:05}")
-        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, args.save_ckpt_dir, yaml, args.save_full_precision)
+        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, dpt_feature_extractor, args.save_ckpt_dir, yaml, args.save_full_precision)
 
         total_elapsed_time = time.time() - training_start_time
         logging.info(f"{Fore.CYAN}Training complete{Style.RESET_ALL}")
@@ -996,7 +992,7 @@ def main(args):
     except Exception as ex:
         logging.error(f"{Fore.LIGHTYELLOW_EX}Something went wrong, attempting to save model{Style.RESET_ALL}")
         save_path = os.path.join(f"{log_folder}/ckpts/errored-{args.project_name}-ep{epoch:02}-gs{global_step:05}")
-        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, args.save_ckpt_dir, yaml, args.save_full_precision)
+        __save_model(save_path, unet, text_encoder, tokenizer, noise_scheduler, vae, depth_estimator, dpt_feature_extractor, args.save_ckpt_dir, yaml, args.save_full_precision)
         raise ex
 
     logging.info(f"{Fore.LIGHTWHITE_EX} ***************************{Style.RESET_ALL}")
